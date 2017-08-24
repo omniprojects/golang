@@ -6,7 +6,8 @@ RUN apt-get install -y --no-install-recommends \
 		gcc \
 		libc6-dev \
 		zip \
-		make
+		make \
+		awscli
 RUN rm -rf /var/lib/apt/lists/*
 
 ENV GOLANG_VERSION 1.8.3
