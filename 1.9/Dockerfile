@@ -32,7 +32,10 @@ ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
 
 RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 777 "$GOPATH"
 
-RUN go get -u github.com/jstemmer/go-junit-report
+RUN go get -u github.com/jstemmer/go-junit-report && \
+		cd "${GOPATH}/src/github.com/jstemmer/go-junit-report" && \
+		go build && \
+		mv go-junit-report /usr/local/bin
 
 WORKDIR $GOPATH
 
