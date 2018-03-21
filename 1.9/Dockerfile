@@ -11,7 +11,8 @@ RUN apt-get install -y --no-install-recommends \
 		libc6-dev \
 		zip \
 		make \
-		awscli
+		awscli \
+		unzip
 RUN rm -rf /var/lib/apt/lists/*
 
 ENV DOCKERIZE_VERSION v0.5.0
@@ -32,10 +33,41 @@ ENV PATH $GOPATH/bin:/usr/local/go/bin:$PATH
 
 RUN mkdir -p "$GOPATH/src" "$GOPATH/bin" && chmod -R 777 "$GOPATH"
 
-RUN go get -u github.com/jstemmer/go-junit-report && \
-		cd "${GOPATH}/src/github.com/jstemmer/go-junit-report" && \
+ENV JUNIT_REPORT_LOCATION github.com/jstemmer/go-junit-report
+RUN go get -u $JUNIT_REPORT_LOCATION && \
+		cd "${GOPATH}/src/$JUNIT_REPORT_LOCATION" && \
 		go build && \
 		mv go-junit-report /usr/local/bin
+
+#Install Protocol Buffer Compiler
+ENV PROTOC_VERSION 3.5.1
+RUN curl -OL https://github.com/google/protobuf/releases/download/v$PROTOC_VERSION/protoc-$PROTOC_VERSION-linux-x86_64.zip && \
+    unzip protoc-$PROTOC_VERSION-linux-x86_64.zip -d protoc && \
+    mv protoc/bin/* /usr/local/bin/ && \
+    mv protoc/include/* /usr/local/include/ && \
+    rm -rf ./protoc && \
+    rm protoc-$PROTOC_VERSION-linux-x86_64.zip
+
+#Install protobuf->Golang generator
+ENV GEN_GO_LOCATION github.com/golang/protobuf/protoc-gen-go
+RUN go get -u $GEN_GO_LOCATION && \
+    cd "${GOPATH}/src/$GEN_GO_LOCATION" && \
+	go build && \
+	mv protoc-gen-go /usr/local/bin
+
+#Install protobuf->Twirp  generator
+ENV GEN_TWIRP_LOCATION github.com/twitchtv/twirp/protoc-gen-twirp
+RUN go get -u $GEN_TWIRP_LOCATION && \
+    cd "${GOPATH}/src/$GEN_TWIRP_LOCATION" && \
+	go build && \
+	mv protoc-gen-twirp /usr/local/bin
+
+#Install protobuf->Swagger  generator
+ENV GEN_SWAGGER_LOCATION github.com/grpc-ecosystem/grpc-gateway/protoc-gen-swagger
+RUN go get -u $GEN_SWAGGER_LOCATION && \
+    cd "${GOPATH}/src/$GEN_SWAGGER_LOCATION" && \
+	go build && \
+	mv protoc-gen-swagger /usr/local/bin
 
 WORKDIR $GOPATH
 
