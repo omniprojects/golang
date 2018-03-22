@@ -69,6 +69,13 @@ RUN go get -u $GEN_SWAGGER_LOCATION && \
 	go build && \
 	mv protoc-gen-swagger /usr/local/bin
 
+#Install protobuf->Validator generator
+ENV GEN_VALIDATORS_LOCATION github.com/mwitkow/go-proto-validators/protoc-gen-govalidators
+RUN go get -u $GEN_VALIDATORS_LOCATION && \
+    cd "${GOPATH}/src/$GEN_VALIDATORS_LOCATION" && \
+	go build && \
+	mv protoc-gen-govalidators /usr/local/bin
+
 WORKDIR $GOPATH
 
 COPY go-wrapper /usr/local/bin/
