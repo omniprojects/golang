@@ -1,8 +1,8 @@
 FROM buildpack-deps:xenial-scm
 
 RUN curl -s https://packagecloud.io/install/repositories/github/git-lfs/script.deb.sh | bash
-RUN sudo curl -Lo /usr/local/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.5/jq-linux64 \
-	&& sudo chmod +x /usr/local/bin/jq
+RUN curl -Lo /usr/local/bin/jq https://github.com/stedolan/jq/releases/download/jq-1.5/jq-linux64 \
+	&& chmod +x /usr/local/bin/jq
 
 RUN apt-get update
 RUN apt-get install -y --no-install-recommends \
