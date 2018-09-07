@@ -1,7 +1,9 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+set -Eeuo pipefail
 
 cd "$(dirname "$(readlink -f "$BASH_SOURCE")")"
+
+source '.architectures-lib'
 
 versions=( "$@" )
 if [ ${#versions[@]} -eq 0 ]; then
@@ -9,85 +11,123 @@ if [ ${#versions[@]} -eq 0 ]; then
 fi
 versions=( "${versions[@]%/}" )
 
+# see http://stackoverflow.com/a/2705678/433558
+sed_escape_lhs() {
+	echo "$@" | sed -e 's/[]\/$*.^|[]/\\&/g'
+}
+sed_escape_rhs() {
+	echo "$@" | sed -e 's/[\/&]/\\&/g' | sed -e ':a;N;$!ba;s/\n/\\n/g'
+}
+
+# https://github.com/golang/go/issues/13220
+allGoVersions=()
+apiBaseUrl='https://www.googleapis.com/storage/v1/b/golang/o?fields=nextPageToken,items%2Fname'
+pageToken=
+while [ "$pageToken" != 'null' ]; do
+	page="$(curl -fsSL "$apiBaseUrl&pageToken=$pageToken")"
+	allGoVersions+=( $(
+		echo "$page" \
+			| jq -r '.items[].name' \
+			| grep -E '^go[0-9].*[.]src[.]tar[.]gz$' \
+			| sed -r -e 's!^go!!' -e 's![.]src[.]tar[.]gz$!!'
+	) )
+	# TODO extract per-version "available binary tarballs" information while we've got it handy here?
+	pageToken="$(echo "$page" | jq -r '.nextPageToken')"
+done
 
 travisEnv=
-googleSource="$(curl -fsSL 'https://golang.org/dl/')"
+appveyorEnv=
 for version in "${versions[@]}"; do
-	# This is kinda gross, but 1.5+ versions install from the binary package
-	# while 1.4 installs from src
-	if [ "$version" = '1.4' ]; then
-		package='src'
-	else
-		package='linux-amd64'
+	rcVersion="${version%-rc}"
+	rcGrepV='-v'
+	if [ "$rcVersion" != "$version" ]; then
+		rcGrepV=
 	fi
+	rcGrepV+=' -E'
+	rcGrepExpr='beta|rc'
 
-	# First check for full version from GitHub as a canonical source
-	fullVersion="$(curl -fsSL "https://raw.githubusercontent.com/golang/go/release-branch.go$version/VERSION" 2>/dev/null || true)"
-	if [ -z "$fullVersion" ]; then
-		echo >&2 "warning: cannot find version from GitHub for $version, scraping golang download page"
-		fullVersion="$(echo $googleSource | grep -Po '">go'"$version"'.*?\.'"$package"'\.tar\.gz</a>' | sed -r 's!.*go([^"/<]+)\.'"$package"'\.tar\.gz.*!\1!' | sort -V | tail -1)"
-	fi
+	fullVersion="$(
+		echo "${allGoVersions[@]}" | xargs -n1 \
+			| grep $rcGrepV -- "$rcGrepExpr" \
+			| grep -E "^${rcVersion}([.a-z]|$)" \
+			| sort -V \
+			| tail -1
+	)" || true
 	if [ -z "$fullVersion" ]; then
 		echo >&2 "warning: cannot find full version for $version"
 		continue
 	fi
 	fullVersion="${fullVersion#go}" # strip "go" off "go1.4.2"
-	versionTag="$fullVersion"
 
-	# Try and fetch the checksum from the golang source page
-	sha256="$(echo $googleSource | grep -Po '">go'"$fullVersion"'\.'"$package"'\.tar\.gz</a>.*?>[a-f0-9]{40,64}<' | sed -r 's!.*>([a-f0-9]{64})<.*!\1!; s!.*[<>]+.*!!' | tail -1)"
-	sha1="$(echo $googleSource | grep -Po '">go'"$fullVersion"'\.'"$package"'\.tar\.gz</a>.*?>[a-f0-9]{40,64}<' | sed -r 's!.*>([a-f0-9]{40})<.*!\1!; s!.*[<>]+.*!!' | tail -1)"
-	if [ -z "$sha1" -a -z "$sha256" ]; then
-		echo >&2 "warning: cannot find sha256 or sha1 for $fullVersion"
+	# https://github.com/golang/build/commit/24f7399f96feb8dd2fc54f064e47a886c2f8bb4a
+	srcSha256="$(curl -fsSL "https://storage.googleapis.com/golang/go${fullVersion}.src.tar.gz.sha256")"
+	if [ -z "$srcSha256" ]; then
+		echo >&2 "warning: cannot find sha256 for $fullVersion src tarball"
 		continue
 	fi
 
-	if [ "$package" = 'src' ]; then
-		srcSha256="$sha256"
-		srcSha1="$sha1"
-	else
-		srcSha256="$(echo $googleSource | grep -Po '">go'"$fullVersion"'\.src\.tar\.gz</a>.*?>[a-f0-9]{40,64}<' | sed -r 's!.*>([a-f0-9]{64})<.*!\1!; s!.*[<>]+.*!!' | tail -1)"
-		srcSha1="$(echo $googleSource | grep -Po '">go'"$fullVersion"'\.src\.tar\.gz</a>.*?>[a-f0-9]{40,64}<' | sed -r 's!.*>([a-f0-9]{40})<.*!\1!; s!.*[<>]+.*!!' | tail -1)"
-	fi
+	linuxArchCase='dpkgArch="$(dpkg --print-architecture)"; '$'\\\n'
+	linuxArchCase+=$'\t''case "${dpkgArch##*-}" in '$'\\\n'
+	for dpkgArch in $(dpkgArches "$version"); do
+		goArch="$(dpkgToGoArch "$version" "$dpkgArch")"
+		sha256="$(curl -fsSL "https://storage.googleapis.com/golang/go${fullVersion}.linux-${goArch}.tar.gz.sha256")"
+		if [ -z "$sha256" ]; then
+			echo >&2 "warning: cannot find sha256 for $fullVersion on arch $goArch"
+			continue 2
+		fi
+		linuxArchCase+=$'\t\t'"$dpkgArch) goRelArch='linux-$goArch'; goRelSha256='$sha256' ;; "$'\\\n'
+	done
+	linuxArchCase+=$'\t\t'"*) goRelArch='src'; goRelSha256='$srcSha256'; "$'\\\n'
+	linuxArchCase+=$'\t\t\t''echo >&2; echo >&2 "warning: current architecture ($dpkgArch) does not have a corresponding Go binary release; will be building from source"; echo >&2 ;; '$'\\\n'
+	linuxArchCase+=$'\t''esac'
 
-	[[ "$versionTag" == *.*[^0-9]* ]] || versionTag+='.0'
-	(
-		set -x
-		sed -ri '
-			s/^(ENV GOLANG_VERSION) .*/\1 '"$fullVersion"'/;
-			s/^(ENV GOLANG_DOWNLOAD_SHA256) .*/\1 '"$sha256"'/;
-			s/^(ENV GOLANG_DOWNLOAD_SHA1) .*/\1 '"$sha1"'/;
-			s/^(ENV GOLANG_SRC_SHA256) .*/\1 '"$srcSha256"'/;
-			s/^(ENV GOLANG_SRC_SHA1) .*/\1 '"$srcSha1"'/;
-			s/^(FROM golang):.*/\1:'"$version"'/;
-		' "$version/Dockerfile" "$version/"*"/Dockerfile"
-		cp go-wrapper "$version/"
-	)
-	if [ "$version" = '1.4' ]; then
-		# 1.4 is our "bootstrap" version for all future versions
-		(
-			set -x
-			sed -ri '
-				s/^(ENV GOLANG_BOOTSTRAP_VERSION) .*/\1 '"$fullVersion"'/;
-				s/^(ENV GOLANG_BOOTSTRAP_SHA256) .*/\1 '"$srcSha256"'/;
-				s/^(ENV GOLANG_BOOTSTRAP_SHA1) .*/\1 '"$srcSha1"'/;
-			' */Dockerfile */*/Dockerfile
-		)
-	fi
-	for variant in alpine wheezy; do
+	windowsSha256="$(curl -fsSL "https://storage.googleapis.com/golang/go${fullVersion}.windows-amd64.zip.sha256")"
+
+	for variant in \
+		alpine3.{7,8} \
+		stretch \
+	; do
 		if [ -d "$version/$variant" ]; then
-			if [ "$variant" != 'alpine' ]; then
-				(
-					set -x
-					sed 's/^FROM .*/FROM buildpack-deps:'"$variant"'-scm/' "$version/Dockerfile" > "$version/$variant/Dockerfile"
-					cp "$version/go-wrapper" "$version/$variant/"
-				)
-			fi
+			tag="$variant"
+			template='debian'
+			case "$variant" in
+				alpine*) tag="${variant#alpine}"; template='alpine' ;;
+			esac
+
+			sed -r \
+				-e 's!%%VERSION%%!'"$fullVersion"'!g' \
+				-e 's!%%TAG%%!'"$tag"'!g' \
+				-e 's!%%SRC-SHA256%%!'"$srcSha256"'!g' \
+				-e 's!%%ARCH-CASE%%!'"$(sed_escape_rhs "$linuxArchCase")"'!g' \
+				"Dockerfile-${template}.template" > "$version/$variant/Dockerfile"
+
 			travisEnv='\n  - VERSION='"$version VARIANT=$variant$travisEnv"
 		fi
 	done
-	travisEnv='\n  - VERSION='"$version VARIANT=$travisEnv"
+
+	for winVariant in \
+		nanoserver-{sac2016,1709,1803} \
+		windowsservercore-{ltsc2016,1709,1803} \
+	; do
+		if [ -d "$version/windows/$winVariant" ]; then
+			sed -r \
+				-e 's!%%VERSION%%!'"$fullVersion"'!g' \
+				-e 's!%%WIN-SHA256%%!'"$windowsSha256"'!g' \
+				-e 's!%%MICROSOFT-TAG%%!'"${winVariant#*-}"'!g' \
+				"Dockerfile-windows-${winVariant%%-*}.template" > "$version/windows/$winVariant/Dockerfile"
+
+			case "$winVariant" in
+				*-1709|*-1803) ;; # no AppVeyor support for 1709 or 1803 yet: https://github.com/appveyor/ci/issues/1885
+				*) appveyorEnv='\n    - version: '"$version"'\n      variant: '"$winVariant$appveyorEnv" ;;
+			esac
+		fi
+	done
+
+	echo "$version: $fullVersion ($srcSha256)"
 done
 
 travis="$(awk -v 'RS=\n\n' '$1 == "env:" { $0 = "env:'"$travisEnv"'" } { printf "%s%s", $0, RS }' .travis.yml)"
 echo "$travis" > .travis.yml
+
+appveyor="$(awk -v 'RS=\n\n' '$1 == "environment:" { $0 = "environment:\n  matrix:'"$appveyorEnv"'" } { printf "%s%s", $0, RS }' .appveyor.yml)"
+echo "$appveyor" > .appveyor.yml
